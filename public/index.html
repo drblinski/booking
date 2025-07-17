@@ -725,14 +725,8 @@
     // Debug logging
     console.log('Widget loading...');
     
-    // Boulevard API Configuration - Updated with sandbox option
-    const BOULEVARD_CONFIG = {
-      businessId: 'f6a06736-1132-4365-b79a-a69c648a746a',
-      apiKey: '93ca3f15-6f0e-491d-840b-681a0fef80ed',
-      // Use sandbox for testing - uncomment next line and comment production line
-      // clientApiUrl: 'https://sandbox.joinblvd.com/api/2020-01/f6a06736-1132-4365-b79a-a69c648a746a/client',
-      clientApiUrl: 'https://dashboard.boulevard.io/api/2020-01/f6a06736-1132-4365-b79a-a69c648a746a/client'
-    };
+    // Backend API Configuration
+    const API_BASE_URL = 'https://get-plump-booking-backend.vercel.app/api';
     
     const LOCATIONS_DATA = {
       'West Village': { 
@@ -813,51 +807,40 @@
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    // Enhanced Boulevard API helper with CORS debugging and retry logic
-    async function makeBoulevardRequest(query, variables = {}, retryCount = 0) {
-      console.log(`🔥 Making Boulevard Client API request (attempt ${retryCount + 1}):`, { 
-        query: query.substring(0, 100) + '...', 
-        variables,
-        cartId: cartId || 'none',
-        endpoint: BOULEVARD_CONFIG.clientApiUrl
+    // Backend API helper with retry logic
+    async function apiRequest(endpoint, data = {}, retryCount = 0) {
+      console.log(`🔥 Making backend API request to /${endpoint} (attempt ${retryCount + 1}):`, { 
+        endpoint, 
+        data,
+        cartId: cartId || 'none'
       });
       
       try {
-        const response = await fetch(BOULEVARD_CONFIG.clientApiUrl, {
+        const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
           method: 'POST',
           headers: {
-            'Authorization': 'Basic ' + btoa(BOULEVARD_CONFIG.apiKey + ':'),
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
+            'Content-Type': 'application/json'
           },
-          body: JSON.stringify({
-            query: query,
-            variables: variables
-          })
+          body: JSON.stringify(data)
         });
 
-        console.log('🔥 Client API response status:', response.status);
-        console.log('🔥 CORS headers:', {
-          'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
-          'access-control-allow-methods': response.headers.get('access-control-allow-methods'),
-          'access-control-allow-headers': response.headers.get('access-control-allow-headers')
-        });
+        console.log('🔥 Backend API response status:', response.status);
         
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
         
-        const data = await response.json();
-        console.log('🔥 Client API response data:', data);
+        const responseData = await response.json();
+        console.log('🔥 Backend API response data:', responseData);
         
-        if (data.errors && data.errors.length > 0) {
-          console.error('🔥 Client API GraphQL errors:', data.errors);
-          throw new Error(`GraphQL Error: ${data.errors.map(e => e.message).join(', ')}`);
+        if (responseData.error) {
+          throw new Error(`API Error: ${responseData.error}`);
         }
         
-        return data.data;
+        return responseData;
       } catch (error) {
-        logError('makeBoulevardRequest', error, { query, variables, retryCount });
+        logError('apiRequest', error, { endpoint, data, retryCount });
         
         // Retry logic with exponential backoff
         if (retryCount < RETRY_CONFIG.maxRetries && 
@@ -871,14 +854,14 @@
           
           console.log(`🔄 Retrying request in ${delay}ms...`);
           await sleep(delay);
-          return makeBoulevardRequest(query, variables, retryCount + 1);
+          return apiRequest(endpoint, data, retryCount + 1);
         }
         
         throw error;
       }
     }
     
-    // Cart validation based on official Boulevard schema (no payment method required)
+    // Cart validation debugging
     async function debugCartStatus() {
       console.log('🔍 Debugging cart status before booking...');
       
@@ -887,54 +870,13 @@
         return null;
       }
       
-      // Using exact fields from Boulevard API documentation
-      const query = `
-        query GetCart($cartId: ID!) {
-          cart(id: $cartId) {
-            id
-            expiresAt
-            completedAt
-            clientInformation {
-              firstName
-              lastName
-              email
-              phoneNumber
-            }
-            selectedItems {
-              id
-              item {
-                id
-                name
-              }
-              selectedStaffVariant {
-                id
-                staff {
-                  id
-                  firstName
-                  lastName
-                }
-              }
-            }
-            startTime
-            endTime
-            startTimeId
-            errors {
-              field
-              message
-              code
-              description
-            }
-          }
-        }
-      `;
-      
       try {
-        const data = await makeBoulevardRequest(query, { id: cartId });
+        const data = await apiRequest('get-cart-details', { cartId });
         const cart = data.cart;
         
         console.log('🔍 Cart debug info:', cart);
         
-        // Validation based on official cart fields
+        // Validation based on cart fields
         const validation = {
           hasCartId: !!cart.id,
           hasClientInfo: !!(cart.clientInformation && cart.clientInformation.email && 
@@ -984,40 +926,7 @@
       scrollToBottom();
     }
 
-    async function reserveTimeSlot() {
-      console.log('🔒 Reserving time slot:', selectedTime.id);
-      
-      const mutation = `
-        mutation ReserveCartBookableItems($cartId: ID!, $bookableTimeId: ID!) {
-          reserveCartBookableItems(input: {
-            id: $cartId,
-            bookableTimeId: $bookableTimeId
-          }) {
-            cart {
-              id
-              startTime
-              endTime
-              startTimeId
-            }
-          }
-        }
-      `;
-      
-      try {
-        const data = await makeBoulevardRequest(mutation, {
-          id: cartId,
-          bookableTimeId: selectedTime.id
-        });
-        console.log('✅ Time slot reserved successfully:', data.reserveCartBookableItems.cart);
-        addMessage('system', `Great! I've reserved your time slot. Now I need your contact information to complete your booking...`);
-        showClientInfoForm();
-      } catch (error) {
-        console.error('❌ Failed to reserve time slot:', error);
-        addMessage('system', `I'm sorry, that time slot is no longer available. Please choose a different time.`);
-        showErrorMessage('Time slot is no longer available. Please select a different time.');
-      }
-    }
-    // Complete API booking with all prerequisites validated
+    // Complete booking via backend API
     async function completeAPIBooking() {
       console.log('✅ Starting booking completion process...');
       
@@ -1032,7 +941,7 @@
       // Show debug info to user (optional - remove in production)
       showDebugMessage('Cart Status Before Booking', validation);
       
-      // Step 2: Validate all prerequisites per Boulevard documentation
+      // Step 2: Validate all prerequisites
       if (!validation.hasCartId) {
         throw new Error('Cart ID is missing');
       }
@@ -1045,12 +954,8 @@
         throw new Error('No services selected in cart');
       }
       
-      if (!validation.hasBookableTime) {
+      if (!validation.hasReservedTime) {
         throw new Error('No time slot reserved in cart');
-      }
-      
-      if (!validation.hasPaymentMethod) {
-        throw new Error('No payment method added to cart - payment is required for booking');
       }
       
       if (validation.hasErrors) {
@@ -1059,62 +964,21 @@
       
       console.log('✅ All cart prerequisites validated, proceeding with checkout...');
       
-      // Step 3: Execute checkout with correct schema structure
-      const mutation = `
-        mutation CheckoutCart($input: CheckoutCartInput!) {
-          checkoutCart(input: $input) {
-            cart {
-              id
-              completedAt
-            }
-            appointments {
-              id
-              startTime
-              endTime
-              state
-              client {
-                firstName
-                lastName
-                email
-              }
-              location {
-                name
-              }
-              appointmentServices {
-                service {
-                  name
-                }
-              }
-              staff {
-                firstName
-                lastName
-              }
-            }
-          }
-        }
-      `;
-      
-      // Input structure per Boulevard documentation - only ID required
-      const input = { 
-        id: cartId 
-      };
-      
+      // Step 3: Execute checkout via backend
       try {
-        const data = await makeBoulevardRequest(mutation, { input: input });
-        console.log('✅ Client API checkout successful:', data);
+        const data = await apiRequest('create-booking', { cartId });
+        console.log('✅ Backend checkout successful:', data);
         
-        const result = data.checkoutCart;
-        
-        if (result.appointments && result.appointments.length > 0) {
-          const appointment = result.appointments[0];
-          console.log('✅ Appointment created via Client API:', appointment.id);
+        if (data.appointments && data.appointments.length > 0) {
+          const appointment = data.appointments[0];
+          console.log('✅ Appointment created via backend:', appointment.id);
           
           return {
             success: true,
             appointmentId: appointment.id,
             appointment: appointment,
-            completedAt: result.cart.completedAt,
-            method: 'Client API checkoutCart'
+            completedAt: data.completedAt,
+            method: 'Backend API'
           };
         } else {
           throw new Error('No appointments created during checkout');
@@ -1122,15 +986,13 @@
       } catch (error) {
         logError('completeAPIBooking', error, { cartId, validation });
         
-        // Enhanced error handling with specific Boulevard API errors
-        if (error.message.includes('Cannot query field')) {
-          throw new Error(`GraphQL Schema Error: ${error.message} - Please check field structure`);
-        } else if (error.message.includes('payment')) {
+        // Enhanced error handling
+        if (error.message.includes('payment')) {
           throw new Error('Payment method validation failed');
         } else if (error.message.includes('network') || error.message.includes('timeout')) {
           throw new Error('Network connection error - please try again');
         } else if (error.message.includes('401') || error.message.includes('403')) {
-          throw new Error('Authentication error - invalid API key or permissions');
+          throw new Error('Authentication error - please try again');
         } else {
           throw new Error(`Booking checkout failed: ${error.message}`);
         }
@@ -1381,160 +1243,91 @@
     }
     
     function loadInjectors() {
-      console.log('🔍 Loading injectors from Boulevard API...');
+      console.log('🔍 Loading injectors from backend API...');
       
       // Show loading state
       addMessage('system', 'Loading our team of injectors...');
       
-      // Check all locations to get complete staff list
-      const locationEntries = Object.entries(LOCATIONS_DATA);
+      // Get staff from all locations via backend
+      const locationNames = Object.keys(LOCATIONS_DATA);
+      console.log('🔍 Getting staff for locations:', locationNames);
       
-      console.log('🔍 Checking locations:', locationEntries.map(([name, data]) => name));
-      
-      // We'll aggregate staff from all locations and track which locations they work at
-      const allStaffPromises = locationEntries.map(([locationName, locationData]) => {
-        const locationId = locationData.locationId.indexOf('urn:blvd:Location:') === 0 ? 
-          locationData.locationId : 'urn:blvd:Location:' + locationData.locationId;
+      Promise.all(locationNames.map(locationName => {
+        const locationId = LOCATIONS_DATA[locationName].locationId;
         
-        console.log('🔍 Creating cart for location:', locationName, locationId);
-        
-        const query = `
-          mutation CreateTempCart($locationId: ID!) {
-            createCart(input: { locationId: $locationId }) {
-              cart {
-                id
-                availableCategories {
-                  name
-                  availableItems {
-                    id
-                    name
-                    ... on CartAvailableBookableItem {
-                      staffVariants {
-                        id
-                        staff {
-                          id
-                          firstName
-                          lastName
-                          nickname
-                          avatar
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        `;
-        
-        return makeBoulevardRequest(query, { locationId: locationId })
+        return apiRequest('get-staff', { locationId })
           .then(data => {
-            console.log('🔍 Response from location:', locationName, data);
+            console.log('🔍 Staff response for', locationName, ':', data);
             return {
               locationName: locationName,
               locationId: locationId,
-              cart: data.createCart.cart
+              staff: data.staff || []
             };
           })
           .catch(error => {
-            console.error('🔍 Failed to load from location:', locationName, error);
+            console.error('🔍 Failed to load staff for location:', locationName, error);
             return {
               locationName: locationName,
               locationId: locationId,
-              cart: null,
+              staff: [],
               error: error.message
             };
           });
-      });
-      
-      Promise.all(allStaffPromises)
-        .then(responses => {
-          console.log('🔍 All cart responses received:', responses);
-          
-          const staffMap = new Map();
-          let totalItemsChecked = 0;
-          let totalStaffVariantsFound = 0;
-          let locationsWithErrors = [];
-          
-          responses.forEach(response => {
-            if (!response || !response.cart) {
-              if (response && response.error) {
-                locationsWithErrors.push(`${response.locationName}: ${response.error}`);
-              }
-              return;
+      }))
+      .then(responses => {
+        console.log('🔍 All staff responses received:', responses);
+        
+        const staffMap = new Map();
+        let locationsWithErrors = [];
+        
+        responses.forEach(response => {
+          if (!response || response.error) {
+            if (response && response.error) {
+              locationsWithErrors.push(`${response.locationName}: ${response.error}`);
             }
-            
-            const { locationName, cart } = response;
-            console.log(`🔍 Processing cart for ${locationName}:`, cart);
-            
-            if (cart.availableCategories) {
-              cart.availableCategories.forEach(category => {
-                console.log(`🔍 Processing category: ${category.name}`);
-                if (category.availableItems) {
-                  category.availableItems.forEach(item => {
-                    totalItemsChecked++;
-                    console.log(`🔍 Processing item: ${item.name}`, item.staffVariants);
-                    
-                    if (item.staffVariants && item.staffVariants.length > 0) {
-                      totalStaffVariantsFound += item.staffVariants.length;
-                      item.staffVariants.forEach(variant => {
-                        if (variant.staff) {
-                          console.log(`🔍 Processing staff variant:`, variant.staff);
-                          if (!staffMap.has(variant.staff.id)) {
-                            staffMap.set(variant.staff.id, {
-                              id: variant.staff.id,
-                              firstName: variant.staff.firstName,
-                              lastName: variant.staff.lastName,
-                              nickname: variant.staff.nickname,
-                              avatar: variant.staff.avatar ? { url: variant.staff.avatar } : null,
-                              role: { name: 'Provider' },
-                              locations: [locationName] // Track locations
-                            });
-                          } else {
-                            // Add this location to the staff member's locations
-                            const staff = staffMap.get(variant.staff.id);
-                            if (!staff.locations.includes(locationName)) {
-                              staff.locations.push(locationName);
-                            }
-                          }
-                        }
-                      });
-                    }
-                  });
-                }
+            return;
+          }
+          
+          const { locationName, staff } = response;
+          console.log(`🔍 Processing staff for ${locationName}:`, staff);
+          
+          staff.forEach(member => {
+            if (!staffMap.has(member.id)) {
+              staffMap.set(member.id, {
+                ...member,
+                locations: [locationName]
               });
+            } else {
+              // Add this location to the staff member's locations
+              const existingMember = staffMap.get(member.id);
+              if (!existingMember.locations.includes(locationName)) {
+                existingMember.locations.push(locationName);
+              }
             }
           });
-          
-          if (locationsWithErrors.length > 0) {
-            console.log('🔍 Locations with errors:', locationsWithErrors);
-          }
-          
-          console.log(`🔍 Summary: ${totalItemsChecked} items checked across all locations, ${totalStaffVariantsFound} staff variants found`);
-          
-          const staffList = Array.from(staffMap.values());
-          console.log('🔍 Final staff list with locations:', staffList);
-          
-          if (staffList.length > 0) {
-            console.log('✅ Successfully loaded staff from Boulevard:', staffList);
-            console.log('✅ Staff and their locations:', staffList.map(s => 
-              `${s.firstName} ${s.lastName}: ${s.locations.join(', ')}`
-            ));
-            availableStaff = staffList;
-            
-            // Force refresh the injector display
-            console.log('🔄 Refreshing injector display...');
-            showInjectors();
-          } else {
-            console.log('❌ No staff found in Boulevard API, using enhanced mock data');
-            loadEnhancedMockStaff();
-          }
-        })
-        .catch(error => {
-          console.error('❌ Failed to load staff from all locations:', error);
-          console.log('❌ Falling back to enhanced mock staff data');
-          loadEnhancedMockStaff();
         });
+        
+        if (locationsWithErrors.length > 0) {
+          console.log('🔍 Locations with errors:', locationsWithErrors);
+        }
+        
+        const staffList = Array.from(staffMap.values());
+        console.log('🔍 Final staff list with locations:', staffList);
+        
+        if (staffList.length > 0) {
+          console.log('✅ Successfully loaded staff from backend:', staffList);
+          availableStaff = staffList;
+          showInjectors();
+        } else {
+          console.log('❌ No staff found, using mock data');
+          loadEnhancedMockStaff();
+        }
+      })
+      .catch(error => {
+        console.error('❌ Failed to load staff from backend:', error);
+        console.log('❌ Falling back to enhanced mock staff data');
+        loadEnhancedMockStaff();
+      });
     }
     
     function loadEnhancedMockStaff() {
@@ -1759,49 +1552,15 @@
     }
     
     async function createCart() {
-      const formattedLocationId = selectedLocationId.indexOf('urn:blvd:Location:') === 0 ? 
-        selectedLocationId : 'urn:blvd:Location:' + selectedLocationId;
-      
-      const query = `
-        mutation CreateCart($locationId: ID!) {
-          createCart(input: { locationId: $locationId }) {
-            cart {
-              id
-              expiresAt
-              availableCategories {
-                name
-                availableItems {
-                  id
-                  name
-                  description
-                  ... on CartAvailableBookableItem {
-                    listPrice
-                    listDuration
-                    staffVariants {
-                      id
-                      price
-                      duration
-                      staff {
-                        id
-                        firstName
-                        lastName
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      `;
-      
       try {
-        const data = await makeBoulevardRequest(query, { locationId: formattedLocationId });
-        const cart = data.createCart.cart;
-        cartId = cart.id;
+        const data = await apiRequest('create-cart', { 
+          locationId: selectedLocationId 
+        });
+        
+        cartId = data.cartId;
         console.log('Cart created:', cartId);
         
-        loadServices(cart);
+        loadServices(data.cart);
       } catch (error) {
         console.error('Cart creation failed:', error.message);
         showErrorFallback('Unable to create booking session. Please try again or contact us.');
@@ -1929,24 +1688,7 @@
     }
     
     async function addServiceToCart() {
-      const mutation = `
-        mutation AddCartItem($cartId: ID!, $itemId: ID!, $itemStaffVariantId: ID) {
-          addCartSelectedBookableItem(input: {
-            id: $cartId,
-            itemId: $itemId,
-            itemStaffVariantId: $itemStaffVariantId
-          }) {
-            cart {
-              id
-              selectedItems {
-                id
-              }
-            }
-          }
-        }
-      `;
-      
-      const variables = { 
+      const requestData = { 
         cartId: cartId, 
         itemId: selectedServiceId 
       };
@@ -1966,17 +1708,17 @@
           
           if (staffVariant) {
             console.log('🎯 Found staff variant:', staffVariant);
-            variables.itemStaffVariantId = staffVariant.id;
+            requestData.itemStaffVariantId = staffVariant.id;
           } else {
             console.log('🎯 No staff variant found for injector, will use first available');
           }
         }
       }
       
-      console.log('🎯 Adding service to cart with variables:', variables);
+      console.log('🎯 Adding service to cart with data:', requestData);
       
       try {
-        const data = await makeBoulevardRequest(mutation, variables);
+        const data = await apiRequest('add-cart-item', requestData);
         console.log('Service added to cart');
         loadCalendarAvailability();
       } catch (error) {
@@ -2144,25 +1886,12 @@
     async function loadAvailabilityForDate(date) {
       const dateStr = date.toISOString().split('T')[0];
       
-      const query = `
-        query GetCartBookableTimes($cartId: ID!, $searchDate: Date!) {
-          cartBookableTimes(
-            id: $cartId,
-            searchDate: $searchDate,
-            tz: "America/New_York"
-          ) {
-            id
-            startTime
-          }
-        }
-      `;
-      
       try {
-        const data = await makeBoulevardRequest(query, { 
+        const data = await apiRequest('get-availability', { 
           cartId: cartId, 
           searchDate: dateStr 
         });
-        const times = data.cartBookableTimes || [];
+        const times = data.times || [];
         calendarAvailability[dateStr] = times;
         return times;
       } catch (error) {
@@ -2242,21 +1971,8 @@
     async function reserveTimeSlot() {
       console.log('🔒 Reserving time slot:', selectedTime.id);
       
-      const mutation = `
-        mutation ReserveCartBookableItems($cartId: ID!, $bookableTimeId: ID!) {
-          reserveCartBookableItems(input: {
-            id: $cartId,
-            bookableTimeId: $bookableTimeId
-          }) {
-            cart {
-              id
-            }
-          }
-        }
-      `;
-      
       try {
-        const data = await makeBoulevardRequest(mutation, {
+        const data = await apiRequest('reserve-time', {
           cartId: cartId,
           bookableTimeId: selectedTime.id
         });
@@ -2266,7 +1982,6 @@
       } catch (error) {
         console.error('❌ Failed to reserve time slot:', error);
         addMessage('system', `I'm sorry, that time slot is no longer available. Please choose a different time.`);
-        // Could reload times here or show error
         showErrorMessage('Time slot is no longer available. Please select a different time.');
       }
     }
@@ -2456,39 +2171,15 @@
     async function updateCartWithClientInfo() {
       console.log('✅ Updating cart with client info...');
       
-      const query = `
-        mutation UpdateCart($cartId: ID!, $email: Email!, $firstName: String!, $lastName: String!, $phoneNumber: PhoneNumber!) {
-          updateCart(input: {
-            id: $cartId,
-            clientInformation: {
-              email: $email,
-              firstName: $firstName,
-              lastName: $lastName,
-              phoneNumber: $phoneNumber
-            }
-          }) {
-            cart {
-              id
-              clientInformation {
-                email
-                firstName
-                lastName
-                phoneNumber
-              }
-            }
-          }
-        }
-      `;
-      
       try {
-        const data = await makeBoulevardRequest(query, {
+        const data = await apiRequest('update-cart', {
           cartId: cartId,
           email: clientInfo.email,
           firstName: clientInfo.firstName,
           lastName: clientInfo.lastName,
           phoneNumber: clientInfo.phoneNumber
         });
-        console.log('✅ Cart updated with client info:', data.updateCart.cart.clientInformation);
+        console.log('✅ Cart updated with client info:', data);
         return data;
       } catch (error) {
         logError('updateCartWithClientInfo', error);
@@ -2633,7 +2324,7 @@
       }, 100);
     }
     
-    console.log('✅ Script fully loaded with enhanced validation and error handling');
+    console.log('✅ Script fully loaded with backend API integration');
   </script>
 </body>
 </html>
